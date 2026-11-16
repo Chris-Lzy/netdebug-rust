@@ -3,6 +3,9 @@
 //! 全 Rust 编写（egui/eframe），没有 HTML/CSS/JS，没有 webview，没有 Tauri。
 //! 窗口默认 1280×800；高 DPI 小屏下首帧自动缩回屏幕内（见 app.rs）。
 
+// release 双击 exe 只出 GUI，不弹控制台；debug 保留控制台看日志
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod app;
 mod bus;
 mod config;

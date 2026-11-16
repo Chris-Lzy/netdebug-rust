@@ -1,4 +1,5 @@
 /target
+/发布/
 config.json
 config.json.bak
 config.json.tmp

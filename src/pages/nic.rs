@@ -93,7 +93,10 @@ impl NicPage {
             let _ = config::save(&shared.config);
         }
         self.loaded_adapter = self.selected_adapter.clone();
-        shared.config.nic.last_adapter = self.selected_adapter.clone();
+        // 枚举完成前选中项还是占位名，写进 last_adapter 会覆盖真实偏好
+        if self.enumerated {
+            shared.config.nic.last_adapter = self.selected_adapter.clone();
+        }
         self.profiles = shared
             .config
             .nic
