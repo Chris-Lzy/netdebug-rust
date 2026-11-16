@@ -1,0 +1,201 @@
+//! 从站页：Modbus 从站模拟（egui 重写）。
+//!
+//! 程序当从站，响应主站的读写；四区数据表可在线改值。
+//! 本文件只画界面，从站响应逻辑是 TODO stub，点启动会弹“未接后端”提示。
+//! 仿真（自增/随机）未定稿：只放一个禁用的“待定”区，不实现。
+
+use crate::app::Shared;
+use crate::pages::Page;
+
+pub struct SlavePage {
+    slave_id: u8,
+    transport: String, // "TCP" / "RTU"
+    tcp_port: u16,
+    serial_port: String,
+    baud: u32,
+    data_bits: u8,
+    parity: String,
+    stop_bits: String,
+    running: bool,
+    coils: Vec<bool>,
+    discrete: Vec<bool>,
+    holding: Vec<u16>,
+    input: Vec<u16>,
+    requests: Vec<String>,
+}
+
+impl Default for SlavePage {
+    fn default() -> Self {
+        Self {
+            slave_id: 1,
+            transport: "TCP".to_string(),
+            tcp_port: 502,
+            serial_port: "COM1".to_string(),
+            baud: 9600,
+            data_bits: 8,
+            parity: "None".to_string(),
+            stop_bits: "1".to_string(),
+            running: false,
+            coils: vec![false; 16],
+            discrete: vec![false; 16],
+            holding: vec![0; 16],
+            input: vec![0; 16],
+            requests: Vec::new(),
+        }
+    }
+}
+
+impl SlavePage {
+    /// 一区数据表：线圈/离散输入（bool 格）。
+    /// 注意是关联函数而不是方法：调用时 `Self::bool_table(ui, …, &mut self.coils)`，
+    /// 否则 `&mut self` 和 `&mut self.coils` 会借用冲突。
+    fn bool_table(ui: &mut egui::Ui, title: &str, data: &mut [bool]) {
+        ui.label(title);
+        egui::Grid::new(title).striped(true).show(ui, |ui| {
+            for (i, v) in data.iter_mut().enumerate() {
+                ui.label(format!("{i}"));
+                ui.checkbox(v, "");
+                if i % 4 == 3 {
+                    ui.end_row();
+                }
+            }
+        });
+    }
+
+    /// 一区数据表：保持/输入寄存器（u16 格）。
+    fn u16_table(ui: &mut egui::Ui, title: &str, data: &mut [u16]) {
+        ui.label(title);
+        egui::Grid::new(title).striped(true).show(ui, |ui| {
+            for (i, v) in data.iter_mut().enumerate() {
+                ui.label(format!("{i}"));
+                ui.add(egui::DragValue::new(v).range(0..=65535));
+                if i % 4 == 3 {
+                    ui.end_row();
+                }
+            }
+        });
+    }
+}
+
+impl Page for SlavePage {
+    fn id(&self) -> &'static str {
+        "slave"
+    }
+    fn title(&self) -> &'static str {
+        "从站"
+    }
+    fn icon(&self) -> &'static str {
+        "▣"
+    }
+
+    fn show(&mut self, ui: &mut egui::Ui, shared: &mut Shared) {
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.add_space(4.0);
+            // ---- 接入设置 ----
+            crate::app::card_frame().show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("从站地址");
+                    ui.add(egui::DragValue::new(&mut self.slave_id).range(1..=247));
+                    ui.label("接入");
+                    egui::ComboBox::from_id_salt("slave_transport")
+                        .selected_text(self.transport.clone())
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.transport, "TCP".to_string(), "Modbus TCP");
+                            ui.selectable_value(&mut self.transport, "RTU".to_string(), "Modbus RTU");
+                        });
+                    if self.transport == "TCP" {
+                        ui.label("监听端口");
+                        ui.add(egui::DragValue::new(&mut self.tcp_port).range(1..=65535));
+                    } else {
+                        ui.label("串口");
+                        ui.add(egui::TextEdit::singleline(&mut self.serial_port).desired_width(80.0));
+                        ui.label("波特率");
+                        egui::ComboBox::from_id_salt("slave_baud")
+                            .selected_text(self.baud.to_string())
+                            .show_ui(ui, |ui| {
+                                for b in [1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200] {
+                                    ui.selectable_value(&mut self.baud, b, b.to_string());
+                                }
+                            });
+                        ui.label("数据位");
+                        egui::ComboBox::from_id_salt("slave_bits")
+                            .selected_text(self.data_bits.to_string())
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut self.data_bits, 8, "8");
+                                ui.selectable_value(&mut self.data_bits, 7, "7");
+                            });
+                        ui.label("校验");
+                        egui::ComboBox::from_id_salt("slave_parity")
+                            .selected_text(self.parity.clone())
+                            .show_ui(ui, |ui| {
+                                for p in ["None", "Even", "Odd"] {
+                                    ui.selectable_value(&mut self.parity, p.to_string(), p);
+                                }
+                            });
+                        ui.label("停止位");
+                        egui::ComboBox::from_id_salt("slave_stop")
+                            .selected_text(self.stop_bits.clone())
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut self.stop_bits, "1".to_string(), "1");
+                                ui.selectable_value(&mut self.stop_bits, "2".to_string(), "2");
+                            });
+                    }
+                    if ui
+                        .add(crate::app::primary(if self.running { "停止" } else { "启动" }))
+                        .clicked()
+                    {
+                        // TODO: 接入从站监听（TCP 502 / RTU 串口）与请求响应。
+                        shared.toast("未接后端：从站功能待实现");
+                    }
+                    crate::app::status(ui, self.running, "监听中", "已停止");
+                });
+            });
+            ui.add_space(10.0);
+
+            // ---- 四区数据表 ----
+            ui.columns(2, |cols| {
+                crate::app::card_frame().show(&mut cols[0], |ui| {
+                    Self::bool_table(ui, "线圈（01/05/15）", &mut self.coils);
+                });
+                crate::app::card_frame().show(&mut cols[1], |ui| {
+                    Self::bool_table(ui, "离散输入（02）", &mut self.discrete);
+                });
+            });
+            ui.add_space(8.0);
+            ui.columns(2, |cols| {
+                crate::app::card_frame().show(&mut cols[0], |ui| {
+                    Self::u16_table(ui, "保持寄存器（03/06/16）", &mut self.holding);
+                });
+                crate::app::card_frame().show(&mut cols[1], |ui| {
+                    Self::u16_table(ui, "输入寄存器（04）", &mut self.input);
+                });
+            });
+            ui.add_space(8.0);
+
+            // ---- 仿真（未定稿，占位）----
+            ui.add_enabled(false, egui::Button::new("仿真（自增/随机）——待定"));
+            ui.add_space(8.0);
+
+            // ---- 请求日志 ----
+            crate::app::section(ui, "请求日志");
+            ui.add_space(4.0);
+            crate::app::card_frame().show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .max_height(160.0)
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        if self.requests.is_empty() {
+                            ui.colored_label(
+                                crate::app::MUTED,
+                                "暂无请求（主站每次读写会记一条：功能码、地址、数量、是否成功）",
+                            );
+                        }
+                        for r in &self.requests {
+                            ui.monospace(r.as_str());
+                        }
+                    });
+            });
+            ui.add_space(4.0);
+        });
+    }
+}
