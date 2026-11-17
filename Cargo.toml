@@ -1,8 +1,8 @@
 [package]
 name = "netdebug"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
-description = "网络调试助手 — TCP/UDP/WebSocket/Modbus 调试 + Modbus 从站模拟 + 网卡 IP 档案（全 Rust 编写）"
+description = "Netdebug — TCP/UDP/WebSocket/Modbus 调试 + Modbus 从站模拟 + 网卡 IP 档案（全 Rust 编写）"
 license = "MIT OR Apache-2.0"
 
 [[bin]]

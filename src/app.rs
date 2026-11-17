@@ -11,18 +11,14 @@ use crate::bus::{Bus, Event};
 use crate::config::{self, AppConfig};
 use crate::log::{LogLevel, LogStore};
 use crate::pages::{self, Page};
-use egui::{Color32, ViewportBuilder, ViewportId};
+use egui::{ViewportBuilder, ViewportId};
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-// ---- 原版 web 风格配色 ----
-pub const ACCENT: Color32 = Color32::from_rgb(0x2d, 0xd4, 0xbf);
-pub const CARD_FILL: Color32 = Color32::from_rgb(0x0f, 0x14, 0x1b);
-pub const BORDER: Color32 = Color32::from_rgb(0x1f, 0x29, 0x37);
-pub const MUTED: Color32 = Color32::from_rgb(0x9c, 0xa3, 0xaf);
-pub const OK: Color32 = Color32::from_rgb(0x34, 0xd3, 0x99);
-pub const ERR: Color32 = Color32::from_rgb(0xf8, 0x71, 0x71);
-const ON_ACCENT: Color32 = Color32::from_rgb(0x06, 0x2a, 0x26);
+// ---- 配色：全部来自 theme.rs（Muse 风格深色暖调）----
+// 页面用的还是这几个名字（`crate::app::ACCENT` 等），
+// 值改在 theme.rs 一处，全站跟着变；这里只做转发，不留第二份色值。
+pub use crate::theme::{ACCENT, BORDER, CARD_FILL, ERR, FAINT, MUTED, OK, ON_ACCENT, TEXT};
 
 /// 卡片容器：深色底 + 细边框 + 圆角，原版 web 的 panel 观感。
 pub fn card_frame() -> egui::Frame {
@@ -33,7 +29,7 @@ pub fn card_frame() -> egui::Frame {
         .inner_margin(egui::Margin::same(12))
 }
 
-/// 主操作按钮（连接/发送/执行）：青绿底深色字。
+/// 主操作按钮（连接/发送/执行）：琥珀底深色字。
 pub fn primary(text: &str) -> egui::Button<'static> {
     egui::Button::new(egui::RichText::new(text).strong().color(ON_ACCENT)).fill(ACCENT)
 }
@@ -66,10 +62,7 @@ pub struct Shared {
 impl Shared {
     pub fn new(config: AppConfig) -> Self {
         let mut log = LogStore::with_default_capacity();
-        log.push(
-            LogLevel::Sys,
-            "网络调试助手 v0.1.0 已启动（框架版，未接后端）",
-        );
+        log.push(LogLevel::Sys, format!("Netdebug v{VERSION} 已启动"));
         Self {
             config,
             log,
@@ -93,10 +86,17 @@ impl Shared {
     }
 }
 
+/// 界面显示的版本号，直接取 Cargo.toml 的版本，改一处就全站跟着变，
+/// 不会再出现顶栏和 Cargo.toml 写着两个版本的情况。
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub struct NetDebugApp {
     pages: Vec<Box<dyn Page>>,
     active: usize,
     detached: HashSet<&'static str>,
+    /// 已对哪些弹出窗口发过深色标题栏命令（每个窗口只发一次；
+    /// 收回页签时要清掉，下次再弹出是新窗口，还得再发一次）。
+    themed_detached: HashSet<&'static str>,
     shared: Shared,
     /// 页签拖拽累计距离（拖出阈值用）
     drag_accum: f32,
@@ -106,23 +106,15 @@ pub struct NetDebugApp {
 
 impl NetDebugApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        // ---- 深色主题（NetDebug 原版配色）----
-        // 必须锁死 ThemePreference::Dark：默认 System 会跟随 Windows 浅色主题，
-        // 把这里设的深色 visuals 覆盖掉。
-        let mut visuals = egui::Visuals::dark();
-        visuals.panel_fill = Color32::from_rgb(0x0a, 0x0e, 0x13);
-        visuals.window_fill = Color32::from_rgb(0x0f, 0x14, 0x1b);
-        visuals.extreme_bg_color = Color32::from_rgb(0x07, 0x0a, 0x0f);
-        visuals.selection.bg_fill = ACCENT;
-        visuals.selection.stroke = egui::Stroke::new(1.0, Color32::from_rgb(0x06, 0x2a, 0x26));
-        visuals.hyperlink_color = ACCENT;
-        visuals.window_stroke = egui::Stroke::new(1.0, BORDER);
-        visuals.window_corner_radius = egui::CornerRadius::same(8);
-        visuals.menu_corner_radius = egui::CornerRadius::same(8);
-        visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, BORDER);
-        cc.egui_ctx.set_visuals_of(egui::Theme::Dark, visuals);
+        // ---- 深色主题（Muse 风格，见 theme.rs）----
+        // theme::apply 里锁死 ThemePreference::Dark：默认 System 会跟随
+        // Windows 浅色主题，把深色 visuals 覆盖掉。
+        crate::theme::apply(&cc.egui_ctx);
+        // 标题栏也从创建时就强制深色：只靠首帧末的主题同步，Windows
+        // 标题栏可能先以浅色画出来，要拖动窗口重绘后才变深；这里提前
+        // 发一次，标题栏从第一帧就是深的（和应用内深色一致）。
         cc.egui_ctx
-            .options_mut(|o| o.theme_preference = egui::ThemePreference::Dark);
+            .send_viewport_cmd(egui::ViewportCommand::SetTheme(egui::SystemTheme::Dark));
         cc.egui_ctx.style_mut_of(egui::Theme::Dark, |style| {
             style.spacing.item_spacing = egui::Vec2::new(10.0, 8.0);
             style.spacing.button_padding = egui::Vec2::new(12.0, 6.0);
@@ -145,6 +137,7 @@ impl NetDebugApp {
             pages,
             active,
             detached: HashSet::new(),
+            themed_detached: HashSet::new(),
             shared: Shared::new(config),
             drag_accum: 0.0,
             window_fitted: false,
@@ -168,15 +161,15 @@ impl NetDebugApp {
         egui::Panel::top("top_bar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(
-                    egui::RichText::new("⇄ 网络调试助手")
+                    egui::RichText::new("⇄ Netdebug")
                         .size(18.0)
                         .strong()
-                        .color(Color32::WHITE),
+                        .color(TEXT),
                 );
-                ui.colored_label(MUTED, egui::RichText::new("v0.1.0").size(12.0));
+                ui.colored_label(MUTED, egui::RichText::new(format!("v{VERSION}")).size(12.0));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     status(ui, self.shared.connected, "已连接", "未连接");
-                    ui.colored_label(MUTED, egui::RichText::new("框架版").size(12.0));
+                    ui.colored_label(FAINT, egui::RichText::new("框架版").size(12.0));
                 });
             });
         });
@@ -191,10 +184,7 @@ impl NetDebugApp {
                     let title = self.pages[i].title().to_string();
                     let icon = self.pages[i].icon().to_string();
                     if self.detached.contains(id) {
-                        ui.colored_label(
-                            Color32::from_rgb(0x9c, 0xa3, 0xaf),
-                            format!("{icon} {title}（已弹出）"),
-                        );
+                        ui.colored_label(MUTED, format!("{icon} {title}（已弹出）"));
                         if ui.button("收回").clicked() {
                             self.detached.remove(id);
                         }
@@ -260,23 +250,28 @@ impl NetDebugApp {
             let title = self.pages[idx].title().to_string();
             let viewport_id = ViewportId::from_hash_of(id);
             let builder = ViewportBuilder::default()
-                .with_title(format!("网络调试助手 - {title}"))
+                .with_title(format!("Netdebug - {title}"))
                 .with_inner_size([900.0, 620.0])
                 .with_min_inner_size([640.0, 420.0]);
             let page = &mut self.pages[idx];
             let shared = &mut self.shared;
+            let themed = &mut self.themed_detached;
             let mut dock = false;
             ctx.show_viewport_immediate(viewport_id, builder, |ui, _class| {
+                // 弹出窗口的标题栏也要强制深色：和主窗口一样，只靠主题
+                // 同步会先以浅色画出来；每个弹出窗口只发一次。
+                if themed.insert(id) {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::SetTheme(
+                        egui::SystemTheme::Dark,
+                    ));
+                }
                 egui::Panel::top("dock_bar").show(ui, |ui| {
                     ui.horizontal(|ui| {
                         if ui.button("⬅ 收回页签").clicked() {
                             dock = true;
                         }
                         ui.strong(&title);
-                        ui.colored_label(
-                            Color32::from_rgb(0x9c, 0xa3, 0xaf),
-                            "独立窗口，与主窗口共享同一份数据",
-                        );
+                        ui.colored_label(MUTED, "独立窗口，与主窗口共享同一份数据");
                     });
                 });
                 egui::CentralPanel::default().show(ui, |ui| {
@@ -289,6 +284,8 @@ impl NetDebugApp {
             });
             if dock {
                 self.detached.remove(id);
+                // 窗口已销毁，下次再弹出是新窗口，标题栏命令要重发。
+                self.themed_detached.remove(id);
             }
         }
     }
@@ -346,7 +343,7 @@ impl NetDebugApp {
             let text = text.clone();
             egui::Panel::bottom("toast_bar").show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.colored_label(Color32::from_rgb(0x2d, 0xd4, 0xbf), "ⓘ");
+                    ui.colored_label(ACCENT, "ⓘ");
                     ui.label(text);
                 });
             });

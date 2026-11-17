@@ -62,7 +62,8 @@ impl Default for NicPage {
 }
 
 impl NicPage {
-    /// 默认档案：Chris 现有的四条真实档案（来自原版 ip_config.xml）。
+    /// 默认档案：四条示例档案（开源版，示例地址；原版来自 ip_config.xml，
+    /// 真实车间地址已替换掉，第一次用时按自己的 PLC 网段改）。
     fn default_profiles() -> Vec<NicProfile> {
         let p = |name: &str, ip: &str| NicProfile {
             name: name.to_string(),
@@ -70,10 +71,10 @@ impl NicPage {
             ..Default::default()
         };
         vec![
-            p("信捷/雷赛", "192.168.6.11"),
-            p("欧姆龙", "192.168.250.200"),
-            p("Festo", "192.168.0.2"),
-            p("施耐德", "192.168.250.201"),
+            p("信捷/雷赛", "192.168.1.11"),
+            p("欧姆龙", "192.168.1.200"),
+            p("Festo", "192.168.1.2"),
+            p("施耐德", "192.168.1.201"),
             NicProfile {
                 name: "配置 5".to_string(),
                 ..Default::default()

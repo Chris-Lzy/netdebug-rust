@@ -1,4 +1,4 @@
-//! 网络调试助手 —— 配置（config.json，放在 exe 同目录）。
+//! Netdebug —— 配置（config.json，放在 exe 同目录）。
 //!
 //! 规则：
 //! - 配置文件只由 Rust 读写，不经过任何前端/脚本；

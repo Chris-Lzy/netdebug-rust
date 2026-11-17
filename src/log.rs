@@ -6,7 +6,7 @@
 use std::collections::VecDeque;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// 日志级别（颜色沿用 NetDebug 原版）。
+/// 日志级别（颜色见 theme.rs：TX 蓝 / RX 绿 / SYS 灰 / ERR 红）。
 /// 框架公共 API：Tx/Rx 由收发逻辑写入，业务逻辑接上后使用。
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,11 +32,12 @@ impl LogLevel {
     }
 
     pub fn color(self) -> egui::Color32 {
+        use crate::theme::{ERR, MUTED, OK, TX};
         match self {
-            LogLevel::Tx => egui::Color32::from_rgb(0x60, 0xa5, 0xfa),
-            LogLevel::Rx => egui::Color32::from_rgb(0x34, 0xd3, 0x99),
-            LogLevel::Sys => egui::Color32::from_rgb(0x9c, 0xa3, 0xaf),
-            LogLevel::Err => egui::Color32::from_rgb(0xf8, 0x71, 0x71),
+            LogLevel::Tx => TX,
+            LogLevel::Rx => OK,
+            LogLevel::Sys => MUTED,
+            LogLevel::Err => ERR,
         }
     }
 }

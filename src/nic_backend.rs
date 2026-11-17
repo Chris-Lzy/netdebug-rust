@@ -44,13 +44,18 @@ pub fn spawn_fetch() -> Receiver<Vec<AdapterInfo>> {
 }
 
 fn fetch_blocking() -> Option<Vec<AdapterInfo>> {
+    // Windows 专属：不弹控制台窗口（CREATE_NO_WINDOW 只在 Windows 上存在）。
+    // 非 Windows 上跳过这一步，`powershell.exe` 不存在，`output()` 直接失败，
+    // 返回 None，和 Windows 上取不到网卡时一样；Windows 上的行为原样不动。
+    #[cfg(windows)]
     use std::os::windows::process::CommandExt;
+    #[cfg(windows)]
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let out = Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .ok()?;
+    let mut cmd = Command::new("powershell.exe");
+    cmd.args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT]);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    let out = cmd.output().ok()?;
     if !out.status.success() {
         return None;
     }
