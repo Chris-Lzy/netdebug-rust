@@ -1,6 +1,6 @@
 [package]
 name = "netdebug"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 description = "Netdebug — TCP/UDP/WebSocket/Modbus 调试 + Modbus 从站模拟 + 网卡 IP 档案（全 Rust 编写）"
 license = "MIT OR Apache-2.0"
@@ -14,6 +14,13 @@ eframe = "0.37"
 egui = "0.37"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# RTU 串口（主站 RTU、从站 RTU、调试页 RTU 共用）
+serialport = "4"
+# WebSocket 直连（调试页；只要 ws://，不要 TLS，保持单文件轻量）
+# url 特性只用来解析 ws:// 地址，handshake 用来做 WS 握手；都不带 TLS。
+tungstenite = { version = "0.26", default-features = false, features = ["url", "handshake"] }
+# WS 地址解析（主机/端口），纯 Rust 无系统依赖。
+url = "2"
 
 [profile.release]
 opt-level = 2

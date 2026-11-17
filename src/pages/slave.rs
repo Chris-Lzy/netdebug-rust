@@ -1,11 +1,14 @@
 //! 从站页：Modbus 从站模拟（egui 重写）。
 //!
-//! 程序当从站，响应主站的读写；四区数据表可在线改值。
-//! 本文件只画界面，从站响应逻辑是 TODO stub，点启动会弹“未接后端”提示。
-//! 仿真（自增/随机）未定稿：只放一个禁用的“待定”区，不实现。
+//! 程序当从站，响应主站的读写；四区数据表可在线改值，退出时存 config.json。
+//! 后端在 slave_backend.rs（TCP 监听 + RTU 串口）；仿真（自增/随机）
+//! 未定稿：只放一个禁用的“待定”区，不实现。
 
 use crate::app::Shared;
 use crate::pages::Page;
+use crate::slave_backend::{self, SlaveData, SlaveHandle, SlaveMsg};
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 
 pub struct SlavePage {
     slave_id: u8,
@@ -17,10 +20,14 @@ pub struct SlavePage {
     parity: String,
     stop_bits: String,
     running: bool,
-    coils: Vec<bool>,
-    discrete: Vec<bool>,
-    holding: Vec<u16>,
-    input: Vec<u16>,
+    /// 四区数据表：界面和后台线程共享同一份，改了立即生效。
+    data: Arc<Mutex<SlaveData>>,
+    /// 运行中的从站服务（启动成功后才有）。
+    handle: Option<SlaveHandle>,
+    /// TCP 实际监听端口（界面状态栏显示用；RTU 时为 0）。
+    listen_port: u16,
+    /// 配置里的从站参数/数据表是否已读进界面（只读一次）。
+    loaded: bool,
     requests: Vec<String>,
 }
 
@@ -36,10 +43,10 @@ impl Default for SlavePage {
             parity: "None".to_string(),
             stop_bits: "1".to_string(),
             running: false,
-            coils: vec![false; 16],
-            discrete: vec![false; 16],
-            holding: vec![0; 16],
-            input: vec![0; 16],
+            data: Arc::new(Mutex::new(SlaveData::new(16))),
+            handle: None,
+            listen_port: 0,
+            loaded: false,
             requests: Vec::new(),
         }
     }
@@ -89,6 +96,41 @@ impl Page for SlavePage {
     }
 
     fn show(&mut self, ui: &mut egui::Ui, shared: &mut Shared) {
+        // 配置里的从站参数/数据表只读一次进界面。
+        if !self.loaded {
+            self.loaded = true;
+            let cfg = &shared.config.slave;
+            self.slave_id = cfg.slave_id;
+            self.tcp_port = cfg.tcp_port;
+            self.baud = cfg.baud;
+            if cfg.holding.len() == 16 {
+                let mut data = self.data.lock().unwrap_or_else(|e| e.into_inner());
+                data.coils.clone_from(&cfg.coils);
+                data.discrete.clone_from(&cfg.discrete);
+                data.holding.clone_from(&cfg.holding);
+                data.input.clone_from(&cfg.input);
+            }
+        }
+        // 收后台日志；收到 Stopped 说明服务已停。
+        let mut stopped = false;
+        if let Some(h) = &self.handle {
+            while let Ok(msg) = h.rx.try_recv() {
+                match msg {
+                    SlaveMsg::Log(line) => {
+                        self.requests.push(line);
+                        if self.requests.len() > 200 {
+                            self.requests.remove(0);
+                        }
+                    }
+                    SlaveMsg::Stopped => stopped = true,
+                }
+            }
+        }
+        if stopped {
+            self.handle = None;
+            self.running = false;
+        }
+
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.add_space(4.0);
             // ---- 接入设置 ----
@@ -141,35 +183,82 @@ impl Page for SlavePage {
                             });
                     }
                     if ui
-                        .add(crate::app::primary(if self.running { "停止" } else { "启动" }))
+                        .add(crate::app::primary(if self.running {
+                            "停止"
+                        } else {
+                            "启动"
+                        }))
                         .clicked()
                     {
-                        // TODO: 接入从站监听（TCP 502 / RTU 串口）与请求响应。
-                        shared.toast("未接后端：从站功能待实现");
+                        if self.running {
+                            if let Some(h) = &self.handle {
+                                h.stop.store(true, Ordering::Relaxed);
+                            }
+                        } else {
+                            let data = self.data.clone();
+                            let res = if self.transport == "TCP" {
+                                slave_backend::start_tcp_slave(self.tcp_port, self.slave_id, data)
+                            } else {
+                                let settings = crate::rtu::SerialSettings {
+                                    port: self.serial_port.trim().to_string(),
+                                    baud: self.baud,
+                                    data_bits: self.data_bits,
+                                    parity: self.parity.clone(),
+                                    stop_bits: self.stop_bits.clone(),
+                                };
+                                slave_backend::start_rtu_slave(settings, self.slave_id, data)
+                            };
+                            match res {
+                                Ok(handle) => {
+                                    self.listen_port = handle.port;
+                                    self.handle = Some(handle);
+                                    self.running = true;
+                                }
+                                Err(e) => {
+                                    shared.toast(e.clone());
+                                    self.requests.push(format!("✗ {e}"));
+                                }
+                            }
+                        }
                     }
-                    crate::app::status(ui, self.running, "监听中", "已停止");
+                    let run_label = if self.transport == "TCP" && self.listen_port > 0 {
+                        format!("监听中 :{}", self.listen_port)
+                    } else {
+                        "监听中".to_string()
+                    };
+                    crate::app::status(ui, self.running, &run_label, "已停止");
                 });
             });
             ui.add_space(10.0);
 
-            // ---- 四区数据表 ----
+            // ---- 四区数据表（和后台线程共享同一份，改了立即生效）----
+            let mut data = self.data.lock().unwrap_or_else(|e| e.into_inner());
             ui.columns(2, |cols| {
                 crate::app::card_frame().show(&mut cols[0], |ui| {
-                    Self::bool_table(ui, "线圈（01/05/15）", &mut self.coils);
+                    Self::bool_table(ui, "线圈（01/05/15）", &mut data.coils);
                 });
                 crate::app::card_frame().show(&mut cols[1], |ui| {
-                    Self::bool_table(ui, "离散输入（02）", &mut self.discrete);
+                    Self::bool_table(ui, "离散输入（02）", &mut data.discrete);
                 });
             });
             ui.add_space(8.0);
             ui.columns(2, |cols| {
                 crate::app::card_frame().show(&mut cols[0], |ui| {
-                    Self::u16_table(ui, "保持寄存器（03/06/16）", &mut self.holding);
+                    Self::u16_table(ui, "保持寄存器（03/06/16）", &mut data.holding);
                 });
                 crate::app::card_frame().show(&mut cols[1], |ui| {
-                    Self::u16_table(ui, "输入寄存器（04）", &mut self.input);
+                    Self::u16_table(ui, "输入寄存器（04）", &mut data.input);
                 });
             });
+            // 数据表同步回配置，退出时存 config.json。
+            shared.config.slave.coils = data.coils.clone();
+            shared.config.slave.discrete = data.discrete.clone();
+            shared.config.slave.holding = data.holding.clone();
+            shared.config.slave.input = data.input.clone();
+            shared.config.slave.slave_id = self.slave_id;
+            shared.config.slave.tcp_port = self.tcp_port;
+            shared.config.slave.baud = self.baud;
+            drop(data);
             ui.add_space(8.0);
 
             // ---- 仿真（未定稿，占位）----

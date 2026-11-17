@@ -3,10 +3,12 @@
 //! 每块网卡 5 条 IP 档案，一键切换；改表自动保存到 config.json。
 //! 注意：
 //! - 适配器枚举和当前 IP 是真实读取（PowerShell Get-NetAdapter，只读不提权）；
-//! - “应用此 IP”最终要调 netsh（需管理员权限，清单 requireAdministrator
-//!   在打包时加），现在是 TODO stub，点确认后只弹“未接后端”提示；
+//! - “应用此 IP”/“恢复 DHCP”/“重命名”都已接 netsh（后台线程跑，每条命令
+//!   10 秒超时），需要管理员权限——打包时 build.rs 把 app.manifest 的
+//!   requireAdministrator 清单嵌进 exe，启动就会弹 UAC；
 //! - 档案的增删改和保存到 config.json 是真的（不碰系统网络，不用提权）；
-//! - 表里四条真实档案是 Chris 现有的（信捷/雷赛、欧姆龙、Festo、施耐德）。
+//! - 表里四条档案是示例地址（信捷/雷赛、欧姆龙、Festo、施耐德），
+//!   第一次用时按自己的 PLC 网段改。
 
 use crate::app::Shared;
 use crate::config::{self, NicProfile};
@@ -32,6 +34,10 @@ pub struct NicPage {
     infos: Vec<AdapterInfo>,
     nic_rx: Option<Receiver<Vec<AdapterInfo>>>,
     enumerated: bool,
+    /// 正在跑的 netsh 任务（应用 IP / 恢复 DHCP / 重命名共用一个槽位）
+    apply_rx: Option<Receiver<Result<String, String>>>,
+    /// 重命名任务要改成的新名字（成功后把选中项和档案一起挪过去）
+    rename_pending: Option<String>,
 }
 
 impl Default for NicPage {
@@ -57,6 +63,8 @@ impl Default for NicPage {
             infos: Vec::new(),
             nic_rx: None,
             enumerated: false,
+            apply_rx: None,
+            rename_pending: None,
         }
     }
 }
@@ -190,6 +198,46 @@ impl NicPage {
         self.set_status(true, "✓ 网卡已枚举");
     }
 
+    /// 收 netsh 任务的结果；成功后刷新一次网卡列表，让“当前 IP”更新。
+    fn poll_apply(&mut self, shared: &mut Shared) {
+        let Some(rx) = self.apply_rx.take() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Ok(msg)) => {
+                if let Some(new_name) = self.rename_pending.take() {
+                    // 重命名成功：config 里旧适配器的档案挪到新名字下，
+                    // 选中项也跟着改名，不然下次打开表就丢了。
+                    let old = self.selected_adapter.clone();
+                    if let Some(entry) = shared
+                        .config
+                        .nic
+                        .profiles
+                        .iter_mut()
+                        .find(|a| a.adapter == old)
+                    {
+                        entry.adapter = new_name.clone();
+                    }
+                    shared.config.nic.last_adapter = new_name.clone();
+                    let _ = config::save(&shared.config);
+                    self.loaded_adapter = new_name.clone();
+                    self.selected_adapter = new_name;
+                }
+                self.set_status(true, msg);
+                self.nic_rx = Some(nic_backend::spawn_fetch());
+            }
+            Ok(Err(e)) => {
+                self.rename_pending = None;
+                self.set_status(false, e);
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => self.apply_rx = Some(rx),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.rename_pending = None;
+                self.set_status(false, "✗ netsh 任务线程异常退出");
+            }
+        }
+    }
+
     fn poll_nic_backend(&mut self, shared: &mut Shared) {
         if !self.enumerated && self.nic_rx.is_none() {
             self.nic_rx = Some(nic_backend::spawn_fetch());
@@ -260,7 +308,7 @@ impl NicPage {
     }
 
     /// “应用此 IP”的确认弹窗。
-    fn show_confirm_dialog(&mut self, ui: &mut egui::Ui, shared: &mut Shared) {
+    fn show_confirm_dialog(&mut self, ui: &mut egui::Ui, _shared: &mut Shared) {
         let Some(row) = self.confirm_apply else {
             return;
         };
@@ -276,11 +324,12 @@ impl NicPage {
                 ));
                 ui.horizontal(|ui| {
                     if ui.button("确定").clicked() {
-                        // TODO: 调 netsh 应用静态 IP（需管理员权限，打包时加
-                        // requireAdministrator 清单）；网关为空传 none，DNS1
-                        // 用 set dns primary，DNS2 用 add dns index=2。
-                        self.set_status(true, format!("✓ 已应用（演示）：{}", p.ip));
-                        shared.toast("未接后端：netsh 调用待实现");
+                        // 后台线程跑 netsh（地址 → DNS1 → DNS2），界面不卡。
+                        self.apply_rx = Some(nic_backend::spawn_apply_static(
+                            self.selected_adapter.clone(),
+                            p.clone(),
+                        ));
+                        self.set_status(true, format!("正在应用 IP {}…", p.ip));
                         self.confirm_apply = None;
                     }
                     if ui.button("取消").clicked() {
@@ -305,6 +354,7 @@ impl Page for NicPage {
     fn show(&mut self, ui: &mut egui::Ui, shared: &mut Shared) {
         self.sync_adapter(shared);
         self.poll_nic_backend(shared);
+        self.poll_apply(shared);
 
         // ---- 底栏（先注册，避免被滚动区挤掉）----
         egui::Panel::bottom("nic_bottom").show(ui, |ui| {
@@ -363,8 +413,10 @@ impl Page for NicPage {
                 self.nic_rx = Some(nic_backend::spawn_fetch());
             }
             if ui.button("恢复 DHCP").clicked() {
-                // TODO: netsh set address/dns dhcp（需管理员权限）。
-                shared.toast("未接后端：恢复 DHCP 待实现");
+                self.apply_rx = Some(nic_backend::spawn_restore_dhcp(
+                    self.selected_adapter.clone(),
+                ));
+                self.set_status(true, "正在恢复 DHCP…");
             }
             if ui.button("重命名适配器").clicked() {
                 self.rename_new_name = self.selected_adapter.clone();
@@ -414,9 +466,20 @@ impl Page for NicPage {
                     });
                     ui.horizontal(|ui| {
                         if ui.button("确定").clicked() {
-                            // TODO: netsh interface set interface newname=...
-                            shared.toast("未接后端：重命名待实现");
-                            self.rename_open = false;
+                            let new = self.rename_new_name.trim().to_string();
+                            if new.is_empty() {
+                                self.set_status(false, "✗ 新名称不能为空");
+                            } else if new == self.selected_adapter {
+                                self.set_status(false, "✗ 新名称和原来一样");
+                            } else {
+                                self.apply_rx = Some(nic_backend::spawn_rename(
+                                    self.selected_adapter.clone(),
+                                    new.clone(),
+                                ));
+                                self.rename_pending = Some(new);
+                                self.set_status(true, "正在重命名适配器…");
+                                self.rename_open = false;
+                            }
                         }
                         if ui.button("取消").clicked() {
                             self.rename_open = false;

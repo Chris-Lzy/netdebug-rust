@@ -1,7 +1,8 @@
-//! 主站页：Modbus TCP 主站（轮询/单次读写，真实后端）。
+//! 主站页：Modbus 主站（轮询/单次读写，真实后端）。
 //!
-//! RTU 串口暂未接后端（点启动弹提示）；TCP 走 modbus.rs 的后台轮询线程。
-//! 结果表和请求日志与从站页风格一致。
+//! TCP 和 RTU 都已接后端：TCP 走 modbus.rs 的后台轮询线程，RTU 走
+//! rtu.rs（CRC16 + 3.5 字符静默判帧）；RTU 用 8 数据位 / 无校验 /
+//! 1 停止位。结果表和请求日志与从站页风格一致。
 
 use crate::app::Shared;
 use crate::modbus::{self, MasterJob, MasterMsg};
@@ -137,19 +138,24 @@ impl MasterPage {
             shared.toast("请先停止当前轮询");
             return;
         }
-        if self.rtu {
-            shared.toast("未接后端：Modbus RTU 串口待实现");
-            return;
-        }
-        let port: u16 = match self.port.trim().parse() {
-            Ok(p) if p > 0 => p,
-            _ => {
-                self.set_status(false, "✗ 端口非法");
-                return;
+        // RTU 不用远程地址/端口；TCP 才校验它们。
+        let port: u16 = if self.rtu {
+            502
+        } else {
+            match self.port.trim().parse() {
+                Ok(p) if p > 0 => p,
+                _ => {
+                    self.set_status(false, "✗ 端口非法");
+                    return;
+                }
             }
         };
-        if self.host.trim().is_empty() {
+        if !self.rtu && self.host.trim().is_empty() {
             self.set_status(false, "✗ 远程地址不能为空");
+            return;
+        }
+        if self.rtu && self.serial.trim().is_empty() {
+            self.set_status(false, "✗ 串口不能为空");
             return;
         }
         let mut qty = self.qty.clamp(1, 125);
@@ -182,7 +188,15 @@ impl MasterPage {
         };
         let stop = Arc::new(AtomicBool::new(false));
         self.stop = Some(stop.clone());
-        self.rx = Some(modbus::spawn_poller(job, stop));
+        self.rx = Some(if self.rtu {
+            let settings = crate::rtu::SerialSettings::master_default(
+                self.serial.trim(),
+                self.baud.trim().parse().unwrap_or(9600),
+            );
+            modbus::spawn_rtu_poller(job, settings, stop)
+        } else {
+            modbus::spawn_poller(job, stop)
+        });
         self.running = true;
         self.set_status(true, if once { "✓ 单次请求已发出" } else { "✓ 轮询已启动" });
     }

@@ -50,6 +50,26 @@ pub struct DebugConfig {
     pub hex_mode: bool,
     pub show_timestamp: bool,
     pub auto_scroll: bool,
+    /// 断线自动重连（TCP Client / WebSocket，1s→2s→5s）
+    pub auto_reconnect: bool,
+    /// 发过的内容（最近在前，最多 20 条）
+    pub send_history: Vec<String>,
+    /// 配置档案（协议 + 地址 + 端口 + 从站地址）
+    pub profiles: Vec<DebugProfile>,
+}
+
+/// 调试页配置档案。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DebugProfile {
+    pub name: String,
+    /// 协议 key：tcp-client / tcp-server / udp / websocket / modbus-tcp / modbus-rtu
+    pub protocol: String,
+    pub remote_host: String,
+    pub remote_port: u16,
+    pub listen_port: u16,
+    pub ws_url: String,
+    pub unit_id: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,6 +81,11 @@ pub struct SlaveConfig {
     pub tcp_port: u16,
     /// 串口波特率（RTU 从站）
     pub baud: u32,
+    /// 四区数据表（各 16 项，退出时保存，下次打开还原）
+    pub coils: Vec<bool>,
+    pub discrete: Vec<bool>,
+    pub holding: Vec<u16>,
+    pub input: Vec<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,6 +144,52 @@ impl Default for DebugConfig {
             hex_mode: true,
             show_timestamp: true,
             auto_scroll: true,
+            auto_reconnect: true,
+            send_history: Vec::new(),
+            // 三个内置档案只是起点（夹爪设备那个地址是示例，改成实际的再用）。
+            profiles: vec![
+                DebugProfile {
+                    name: "默认".to_string(),
+                    protocol: "tcp-client".to_string(),
+                    remote_host: "127.0.0.1".to_string(),
+                    remote_port: 502,
+                    listen_port: 9000,
+                    ws_url: "ws://127.0.0.1:8080".to_string(),
+                    unit_id: 1,
+                },
+                DebugProfile {
+                    name: "PLC-502".to_string(),
+                    protocol: "modbus-tcp".to_string(),
+                    remote_host: "127.0.0.1".to_string(),
+                    remote_port: 502,
+                    listen_port: 9000,
+                    ws_url: "ws://127.0.0.1:8080".to_string(),
+                    unit_id: 1,
+                },
+                DebugProfile {
+                    name: "夹爪设备".to_string(),
+                    protocol: "tcp-client".to_string(),
+                    remote_host: "127.0.0.1".to_string(),
+                    remote_port: 9000,
+                    listen_port: 9000,
+                    ws_url: "ws://127.0.0.1:8080".to_string(),
+                    unit_id: 1,
+                },
+            ],
+        }
+    }
+}
+
+impl Default for DebugProfile {
+    fn default() -> Self {
+        Self {
+            name: "默认".to_string(),
+            protocol: "tcp-client".to_string(),
+            remote_host: "127.0.0.1".to_string(),
+            remote_port: 502,
+            listen_port: 9000,
+            ws_url: "ws://127.0.0.1:8080".to_string(),
+            unit_id: 1,
         }
     }
 }
@@ -129,6 +200,10 @@ impl Default for SlaveConfig {
             slave_id: 1,
             tcp_port: 502,
             baud: 9600,
+            coils: vec![false; 16],
+            discrete: vec![false; 16],
+            holding: vec![0; 16],
+            input: vec![0; 16],
         }
     }
 }

@@ -1,19 +1,19 @@
-# Netdebug v0.1.1（Rust 重写）
+# Netdebug v0.2.0（Rust 重写）
 
 > **全部用 Rust 写**：egui/eframe 原生界面，没有 HTML/CSS/JS，没有 webview，
 > 没有 Tauri。HTML 原型只留作布局参考，不参与实现。
 > 旧的 Tauri + HTML 框架已归档在 `~/workspace/netdebug-rust-tauri-archive/`，没有删除。
 
-## 状态：框架版 + 部分真实后端
+## 状态：全功能版
 
-四个页面都已搭好，后端接了一部分（其余 stub 点下去弹”未接后端”）：
+四个页面的后端都已接通，唯一还灰着的是从站页的“仿真（自增/随机）”——方案没定，有意留到以后做：
 
 | 页面 | 状态 |
 |---|---|
-| 调试 | 6 种协议切换字段、配置档案、日志、原始/Modbus 发送区；**地址栏历史记录+下拉**是真的；连接/发送是 stub |
-| 主站 | Modbus TCP 主站：**真实轮询/单次读写**（01/02/03/04/05/06/15/16、异常码中文报错、结果表+请求日志）；RTU 串口是 stub |
-| 从站 | 从站地址、TCP 502/RTU 串口、四区数据表可在线改值、请求日志；仿真是禁用的”待定”区 |
-| 网卡 | **适配器枚举和当前 IP/掩码/网关/DNS 是真实读取**（PowerShell，只读不提权）；档案增删改+保存 config.json 是真的；应用 IP/恢复 DHCP/重命名（netsh，需管理员）是 stub |
+| 调试 | **6 种协议收发都可用**：TCP Client（5 秒超时、断线自动重连 1s→2s→5s）、TCP Server（只绑 127.0.0.1，多客户端）、UDP（回包发给最近发送方）、WebSocket（只支持 ws://）、Modbus TCP/RTU（执行一次/轮询）；配置档案是真的（可选可保存）、发送历史、定时发送、日志保存 .log |
+| 主站 | Modbus **TCP 和 RTU** 主站：**真实轮询/单次读写**（01/02/03/04/05/06/15/16、异常码中文报错、结果表+请求日志）；RTU 走 CRC16 + 3.5 字符静默判帧 |
+| 从站 | **TCP 监听（0.0.0.0:502）+ RTU 串口**，四区数据表和后台线程共享、改了立即生效、退出存 config.json，请求日志（200 条）；仿真是禁用的”待定”区 |
+| 网卡 | **适配器枚举和当前 IP/掩码/网关/DNS 是真实读取**（PowerShell，只读不提权）；档案增删改+保存 config.json 是真的；**应用 IP / 恢复 DHCP / 重命名都已接 netsh**（后台线程、每条命令 10 秒超时），exe 嵌了 `requireAdministrator` 清单，启动弹一次 UAC |
 
 ## 模块地图
 
@@ -30,8 +30,13 @@ src/
 │   ├── slave.rs   # 从站页
 │   ├── nic.rs     # 网卡页
 │   └── template.rs# 示例页（模板，默认不显示）
-├── modbus.rs      # Modbus TCP 帧打包/解析 + 后台轮询线程
-├── nic_backend.rs # 网卡只读枚举（PowerShell Get-NetAdapter，后台线程）
+├── modbus.rs      # Modbus 帧打包/解析 + TCP/RTU 后台轮询线程
+├── rtu.rs         # Modbus RTU：CRC16、组帧/验帧、3.5 字符静默判帧、串口开关
+├── slave_backend.rs # Modbus 从站：TCP 监听 + RTU 串口，四区数据表共享、请求日志
+├── debug_backend.rs # 调试页后台：TCP Client/Server、UDP、WebSocket 收发会话
+├── nic_backend.rs # 网卡枚举（PowerShell Get-NetAdapter）+ netsh 改 IP/DHCP/重命名
+├── build.rs       # Windows 打包：windres 把 app.manifest（requireAdministrator）嵌进 exe
+├── app.manifest   # 管理员提权清单（requireAdministrator）
 ├── config.rs      # config.json（exe 同目录）：损坏自动备份 .bak 再回默认值，原子写盘
 ├── log.rs         # 有界环形日志（默认 3000 条，满了丢最旧并计数）
 ├── bus.rs         # 事件总线（有界 mpsc，页面与后台任务互不认识）
@@ -75,18 +80,19 @@ src/
 :: 3. 进项目目录
 cargo run                 :: 调试运行
 cargo build --release     :: 出 exe，target\release\netdebug.exe
-cargo test --release      :: 22 个测试
+cargo test --release      :: 45 个测试
 ```
 
 高 DPI 小屏注意：窗口首帧会自动缩回屏幕内（`app.rs::fit_window_to_screen`），
 250% 缩放的 4K 屏实测完整可见。
 
-打包时要补两件事（框架阶段还没做）：
+打包时还差一件事（其余的已做）：
 
 - 应用图标：发布前放一个 `netdebug.ico`，在 `main.rs` 里用
   `ViewportBuilder::with_icon(...)` 挂上；
-- 网卡提权：发布版要在 exe 清单里加 `requireAdministrator`
-  （原版 nettool 就是这么做的，启动弹一次 UAC）。
+- 网卡提权已做：`app.manifest` 里是 `requireAdministrator`，`build.rs`
+  在 Windows 构建时调 windres 把清单嵌进 exe（GNU 工具链），启动弹一次 UAC。
+  改了清单要整包重编才生效。
 
 ## 验证实话（2026-11-16，Linux 虚拟机）
 
@@ -99,6 +105,7 @@ cargo test --release      :: 22 个测试
 | 无 HTML/CSS/JS/webview/Tauri | ✅ 项目里一个 `.html`/`.css`/`.js` 文件都没有；`src/` 里 grep `tauri|webview` 只剩 main.rs 里一句“没有 Tauri”的注释。 |
 | 2026-11-17 配色优化后（Linux 虚拟机） | ✅ `cargo check` 0 警告、`cargo test` 22 通过。顺手修了一个跨平台编译问题：`nic_backend.rs` 的 `CREATE_NO_WINDOW` 只在 Windows 上存在，原先在 Linux 上 `cargo check` 直接报 2 个错；现已用 `#[cfg(windows)]` 隔开，Windows 行为原样不动，Linux 也能编过（取不到网卡时返回空，和 Windows 上失败时一致）。`cargo fmt --check` 仍报一些旧文件（modbus/master/nic/slave/debug）的格式差异，是上传包里就有的、和本机 Windows 的 rustfmt 版本不一致造成的，这次没动它们，只保证了新改的文件格式干净。 |
 | v0.1.1（2026-11-17） | ✅ `cargo check` 0 警告、`cargo test` 22 通过。去命令窗口：`main.rs` 改成无条件 `#![windows_subsystem = "windows"]`，debug 和 release 双击都只有应用；标题栏强制深色：主窗口创建时发一次 `ViewportCommand::SetTheme(Dark)`，弹出窗口在 `show_viewport_immediate` 里每个窗口发一次（收回后重弹再发），不再是启动白标题栏、拖动才变深。界面显示的版本号改从 `Cargo.toml` 取（`app.rs::VERSION`），不再手写。标题栏和控制台的效果只能在 Windows 真机上确认。 |
+| v0.2.0（2026-11-17） | ✅ `cargo check` 0 警告、`cargo test` 45 通过（新增 23 个：RTU 6、从站 7、调试页 7、网卡 3）。四块待实现全部接通：主站 RTU（`rtu.rs`：CRC16、3.5 字符静默判帧、串口）、从站模拟（`slave_backend.rs`：TCP 监听 + RTU、四区表共享、请求日志、表存 config.json）、调试页六种协议（`debug_backend.rs`：TCP Client/Server、UDP 回包修正、WebSocket、Modbus TCP/RTU，自动重连 1s→2s→5s、发送历史、定时发送、配置档案、日志保存）、网卡 netsh（`nic_backend.rs`：应用 IP / 恢复 DHCP / 重命名，后台线程、10 秒超时）+ `app.manifest` requireAdministrator 清单（`build.rs` 用 windres 嵌进 exe）。**Windows 真机还没验的**：真实串口收发、真实 PLC 连从站、UDP 收发回环（Linux 沙箱禁了 UDP 收包，虚拟机里验不了）、真改 IP 和清单提权——这些要到 Windows 11 上试。修了两个真 bug：UDP 回包发错目标（现发给最近发送方）、tungstenite 的 `write` 只进写缓冲不发出去（现每次 `write` 后都 `flush`，回环测试抓出来的）。 |
 
 **egui 0.37 的 API 变化（写框架时踩到的坑，后人注意）：**
 

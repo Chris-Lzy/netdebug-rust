@@ -42,8 +42,8 @@ pub fn is_bits(fc: u8) -> bool {
     matches!(fc, 1 | 2)
 }
 
-/// MBAP + PDU 请求帧。
-pub fn build_request(tid: u16, job: &MasterJob) -> Vec<u8> {
+/// PDU 部分（功能码 + 地址/数量/值），TCP 和 RTU 共用。
+pub fn build_pdu(job: &MasterJob) -> Vec<u8> {
     let mut pdu = vec![job.fc];
     pdu.extend_from_slice(&job.addr.to_be_bytes());
     match job.fc {
@@ -76,6 +76,12 @@ pub fn build_request(tid: u16, job: &MasterJob) -> Vec<u8> {
         }
         _ => {}
     }
+    pdu
+}
+
+/// MBAP + PDU 请求帧（Modbus TCP）。
+pub fn build_request(tid: u16, job: &MasterJob) -> Vec<u8> {
+    let pdu = build_pdu(job);
     let mut frame = Vec::with_capacity(7 + pdu.len());
     frame.extend_from_slice(&tid.to_be_bytes());
     frame.extend_from_slice(&0u16.to_be_bytes());
@@ -83,6 +89,37 @@ pub fn build_request(tid: u16, job: &MasterJob) -> Vec<u8> {
     frame.push(job.unit);
     frame.extend_from_slice(&pdu);
     frame
+}
+
+/// 按功能码把数量夹到合法范围（读线圈 2000 / 读寄存器 125 / 写多线圈 1968 / 写多寄存器 123）。
+pub fn clamp_qty(fc: u8, qty: u16) -> u16 {
+    match fc {
+        1 | 2 => qty.clamp(1, 2000),
+        3 | 4 => qty.clamp(1, 125),
+        15 => qty.clamp(1, 1968),
+        16 => qty.clamp(1, 123),
+        _ => 1,
+    }
+}
+
+/// 解析写值：按 `,` / 空格 / `;` / `，` 切，接受十进制、`0x` 十六进制、
+/// `on|off|true|false`（线圈 1/0）。解析失败的当 0。
+pub fn parse_values(text: &str) -> Vec<u16> {
+    text.split(|c| c == ',' || c == ' ' || c == ';' || c == '，' || c == '\t' || c == '\n')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| match s.to_ascii_lowercase().as_str() {
+            "on" | "true" => 1,
+            "off" | "false" => 0,
+            _ => {
+                if let Some(h) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+                    u16::from_str_radix(h, 16).unwrap_or(0)
+                } else {
+                    s.parse().unwrap_or(0)
+                }
+            }
+        })
+        .collect()
 }
 
 /// 解析响应 PDU（不含 MBAP）。异常码返回 Err。
@@ -168,9 +205,100 @@ pub fn spawn_poller(job: MasterJob, stop: Arc<AtomicBool>) -> Receiver<MasterMsg
                         } else {
                             let _ = tx.try_send(MasterMsg::Log(format!(
                                 "{label} ✓ {} 项",
-                                if is_bits(job.fc) { bits.len() } else { regs.len() }
+                                if is_bits(job.fc) {
+                                    bits.len()
+                                } else {
+                                    regs.len()
+                                }
                             )));
-                            let _ = tx.try_send(MasterMsg::Read { addr: job.addr, bits, regs });
+                            let _ = tx.try_send(MasterMsg::Read {
+                                addr: job.addr,
+                                bits,
+                                regs,
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.try_send(MasterMsg::Log(e));
+                    }
+                }
+                if job.once {
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let _ = tx.try_send(MasterMsg::Stopped);
+    });
+    rx
+}
+
+/// 起后台线程（RTU）：打开串口 → 按周期发 RTU 请求 → 结果送通道。
+/// 响应用 3.5 字符静默间隔判帧尾、验 CRC；超时 1 秒。stop 置 true 后退出。
+pub fn spawn_rtu_poller(
+    job: MasterJob,
+    settings: crate::rtu::SerialSettings,
+    stop: Arc<AtomicBool>,
+) -> Receiver<MasterMsg> {
+    let (tx, rx) = bounded_channel::<MasterMsg>(64);
+    std::thread::spawn(move || {
+        let mut port = match settings.open() {
+            Ok(p) => p,
+            Err(e) => {
+                let _ = tx.try_send(MasterMsg::Log(format!("✗ {e}")));
+                let _ = tx.try_send(MasterMsg::Stopped);
+                return;
+            }
+        };
+        let t35 = crate::rtu::char_time_3_5(settings.baud);
+        let _ = tx.try_send(MasterMsg::Log(format!(
+            "✓ 串口 {} 已打开（{} 波特，8/N/1）",
+            settings.port, settings.baud
+        )));
+        let mut timer = IntervalTimer::new(Duration::from_millis(job.interval_ms.max(20)));
+        loop {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            if timer.due() {
+                let pdu = build_pdu(&job);
+                let label = format!("→ RTU FC{:02} 地址={} 数量={}", job.fc, job.addr, job.qty);
+                let result = crate::rtu::write_rtu_frame(port.as_mut(), job.unit, &pdu)
+                    .map_err(|e| format!("✗ {label} 失败：{e}"))
+                    .and_then(|_| {
+                        crate::rtu::read_rtu_frame(port.as_mut(), t35, Duration::from_millis(1000))
+                            .map_err(|e| format!("✗ {label} {e}"))
+                    })
+                    .and_then(|frame| {
+                        crate::rtu::strip_rtu_frame(&frame).map_err(|e| format!("✗ {label} {e}"))
+                    })
+                    .and_then(|(unit, pdu)| {
+                        if unit != job.unit {
+                            return Err(format!(
+                                "✗ {label} 从站地址不匹配：期望 {} 收到 {unit}",
+                                job.unit
+                            ));
+                        }
+                        parse_response(job.fc, &pdu).map_err(|e| format!("✗ {label} {e}"))
+                    });
+                match result {
+                    Ok((bits, regs)) => {
+                        if is_write(job.fc) {
+                            let _ = tx.try_send(MasterMsg::Log(format!("{label} ✓ 写入确认")));
+                        } else {
+                            let _ = tx.try_send(MasterMsg::Log(format!(
+                                "{label} ✓ {} 项",
+                                if is_bits(job.fc) {
+                                    bits.len()
+                                } else {
+                                    regs.len()
+                                }
+                            )));
+                            let _ = tx.try_send(MasterMsg::Read {
+                                addr: job.addr,
+                                bits,
+                                regs,
+                            });
                         }
                     }
                     Err(e) => {
@@ -268,7 +396,7 @@ mod tests {
         std::thread::spawn(move || {
             let (mut s, _) = listener.accept().unwrap();
             let mut buf = [0u8; 256];
-            let n = s.read(&mut buf).unwrap();
+            let _n = s.read(&mut buf).unwrap();
             let pdu = [3u8, 4, 0x00, 0x0A, 0x00, 0x14];
             let mut resp = vec![buf[0], buf[1], 0, 0];
             resp.extend_from_slice(&((pdu.len() + 1) as u16).to_be_bytes());

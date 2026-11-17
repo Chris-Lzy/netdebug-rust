@@ -13,11 +13,14 @@
 mod app;
 mod bus;
 mod config;
+mod debug_backend;
 mod industrial;
 mod log;
 mod modbus;
 mod nic_backend;
 mod pages;
+mod rtu;
+mod slave_backend;
 mod theme;
 
 fn main() -> eframe::Result<()> {
