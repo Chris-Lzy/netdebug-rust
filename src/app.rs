@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 // ---- 配色：全部来自 theme.rs（Muse 风格深色暖调）----
 // 页面用的还是这几个名字（`crate::app::ACCENT` 等），
 // 值改在 theme.rs 一处，全站跟着变；这里只做转发，不留第二份色值。
-pub use crate::theme::{ACCENT, BORDER, CARD_FILL, ERR, FAINT, MUTED, OK, ON_ACCENT, TEXT};
+pub use crate::theme::{ACCENT, BORDER, CARD_FILL, ERR, MUTED, OK, ON_ACCENT, TEXT};
 
 /// 卡片容器：深色底 + 细边框 + 圆角，原版 web 的 panel 观感。
 pub fn card_frame() -> egui::Frame {
@@ -169,7 +169,6 @@ impl NetDebugApp {
                 ui.colored_label(MUTED, egui::RichText::new(format!("v{VERSION}")).size(12.0));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     status(ui, self.shared.connected, "已连接", "未连接");
-                    ui.colored_label(FAINT, egui::RichText::new("框架版").size(12.0));
                 });
             });
         });

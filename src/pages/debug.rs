@@ -377,8 +377,11 @@ impl DebugPage {
                 });
             ui.label("地址");
             ui.add(egui::DragValue::new(&mut self.address).range(0..=65535));
-            ui.label("数量");
-            ui.add(egui::DragValue::new(&mut self.quantity).range(1..=2000));
+            if !matches!(self.fc_code(), 5 | 6) {
+                ui.label("数量");
+                let max_qty = modbus::clamp_qty(self.fc_code(), u16::MAX);
+                ui.add(egui::DragValue::new(&mut self.quantity).range(1..=max_qty));
+            }
             if modbus::is_write(self.fc_code()) {
                 ui.label("值");
                 ui.add(
@@ -855,6 +858,11 @@ impl Page for DebugPage {
             self.remote_port = cfg.remote_port;
             self.listen_port = cfg.listen_port;
             self.ws_url = cfg.ws_url.clone();
+            self.serial_port = cfg.serial_port.clone();
+            self.baud = cfg.baud;
+            self.data_bits = cfg.data_bits;
+            self.parity = cfg.parity.clone();
+            self.stop_bits = cfg.stop_bits.clone();
             self.unit_id = cfg.unit_id;
             self.hex_mode = cfg.hex_mode;
             self.show_timestamp = cfg.show_timestamp;
@@ -889,6 +897,11 @@ impl Page for DebugPage {
             cfg.remote_port = self.remote_port;
             cfg.listen_port = self.listen_port;
             cfg.ws_url = self.ws_url.clone();
+            cfg.serial_port = self.serial_port.clone();
+            cfg.baud = self.baud;
+            cfg.data_bits = self.data_bits;
+            cfg.parity = self.parity.clone();
+            cfg.stop_bits = self.stop_bits.clone();
             cfg.unit_id = self.unit_id;
             cfg.hex_mode = self.hex_mode;
             cfg.show_timestamp = self.show_timestamp;
@@ -909,6 +922,7 @@ impl Page for DebugPage {
                     crate::app::card_frame().show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.label("协议");
+                            let prev_protocol = self.protocol;
                             egui::ComboBox::from_id_salt("protocol")
                                 .selected_text(self.protocol.label())
                                 .width(ui.available_width())
@@ -917,6 +931,11 @@ impl Page for DebugPage {
                                         ui.selectable_value(&mut self.protocol, p, p.label());
                                     }
                                 });
+                            if self.protocol != prev_protocol
+                                && (self.session.is_some() || self.modbus_poll_rx.is_some())
+                            {
+                                self.disconnect(shared);
+                            }
                         });
                         ui.add_space(6.0);
                         self.show_connection_fields(ui, shared);

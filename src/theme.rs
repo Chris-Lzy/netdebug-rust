@@ -32,6 +32,7 @@ pub const TEXT: Color32 = Color32::from_rgb(0xf3, 0xee, 0xe6);
 /// 次要文字：暖灰（小节标题、时间戳、说明）。
 pub const MUTED: Color32 = Color32::from_rgb(0xa3, 0x9c, 0x90);
 /// 更弱的文字（占位、脚注）。
+#[allow(dead_code)]
 pub const FAINT: Color32 = Color32::from_rgb(0x7d, 0x76, 0x6b);
 
 /// 主强调色：暖琥珀（主按钮、选中、链接、提示）。

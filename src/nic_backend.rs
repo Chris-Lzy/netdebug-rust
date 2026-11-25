@@ -229,6 +229,43 @@ fn run_netsh(args: &[String]) -> Result<String, String> {
     r
 }
 
+/// 解码 Windows 控制台子进程输出：先试 UTF-8，失败则按系统 OEM 代码页（如中文 Windows GBK）解码。
+#[cfg(windows)]
+fn decode_console_bytes(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return String::new();
+    }
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return s.to_string();
+    }
+    const CP_OEMCP: u32 = 1;
+    extern "system" {
+        fn MultiByteToWideChar(
+            code_page: u32,
+            flags: u32,
+            mb_str: *const u8,
+            mb_len: i32,
+            wc_str: *mut u16,
+            wc_len: i32,
+        ) -> i32;
+    }
+    let Ok(mb_len) = i32::try_from(bytes.len()) else {
+        return String::from_utf8_lossy(bytes).into_owned();
+    };
+    unsafe {
+        let needed = MultiByteToWideChar(CP_OEMCP, 0, bytes.as_ptr(), mb_len, std::ptr::null_mut(), 0);
+        if needed <= 0 {
+            return String::from_utf8_lossy(bytes).into_owned();
+        }
+        let mut wide = vec![0u16; needed as usize];
+        let written = MultiByteToWideChar(CP_OEMCP, 0, bytes.as_ptr(), mb_len, wide.as_mut_ptr(), needed);
+        if written <= 0 {
+            return String::from_utf8_lossy(bytes).into_owned();
+        }
+        String::from_utf16_lossy(&wide[..written as usize])
+    }
+}
+
 #[cfg(windows)]
 fn run_netsh_windows(args: &[String]) -> Result<String, String> {
     use std::os::windows::process::CommandExt;
@@ -260,8 +297,8 @@ fn run_netsh_windows(args: &[String]) -> Result<String, String> {
         .map_err(|e| format!("读 netsh 输出失败：{e}"))?;
     let text = format!(
         "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
+        decode_console_bytes(&out.stdout),
+        decode_console_bytes(&out.stderr)
     );
     if out.status.success() {
         Ok(text)
@@ -512,5 +549,14 @@ mod tests {
         assert!(rename_adapter("以太网", "").is_err());
         assert!(rename_adapter("以太网", "以太网").is_err());
         assert!(restore_dhcp("").is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn decode_console_bytes_handles_utf8_and_oem() {
+        assert_eq!(decode_console_bytes("正常 UTF-8".as_bytes()), "正常 UTF-8");
+        // GBK 编码的 "测试" = B2 E2 CA D4（在中文 Windows OEM=936 下可还原，非中文下至少不 panic）
+        let s = decode_console_bytes(&[0xB2, 0xE2, 0xCA, 0xD4]);
+        assert!(!s.is_empty());
     }
 }

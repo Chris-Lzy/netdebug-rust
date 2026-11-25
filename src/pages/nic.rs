@@ -271,15 +271,14 @@ impl NicPage {
             }
             ui.end_row();
             for row in 0..self.profiles.len() {
-                // 点配置名称框即选中该行
                 let mut p = self.profiles[row].clone();
                 let resp_name =
                     ui.add_sized([90.0, 26.0], egui::TextEdit::singleline(&mut p.name));
-                ui.add_sized([125.0, 26.0], egui::TextEdit::singleline(&mut p.ip));
-                ui.add_sized([110.0, 26.0], egui::TextEdit::singleline(&mut p.mask));
-                ui.add_sized([125.0, 26.0], egui::TextEdit::singleline(&mut p.gateway));
-                ui.add_sized([90.0, 26.0], egui::TextEdit::singleline(&mut p.dns1));
-                ui.add_sized([90.0, 26.0], egui::TextEdit::singleline(&mut p.dns2));
+                let r_ip = ui.add_sized([125.0, 26.0], egui::TextEdit::singleline(&mut p.ip));
+                let r_mask = ui.add_sized([110.0, 26.0], egui::TextEdit::singleline(&mut p.mask));
+                let r_gw = ui.add_sized([125.0, 26.0], egui::TextEdit::singleline(&mut p.gateway));
+                let r_dns1 = ui.add_sized([90.0, 26.0], egui::TextEdit::singleline(&mut p.dns1));
+                let r_dns2 = ui.add_sized([90.0, 26.0], egui::TextEdit::singleline(&mut p.dns2));
                 if ui.button("应用此 IP").clicked() {
                     if p.ip.trim().is_empty() {
                         self.set_status(false, "✗ IP 地址不能为空！");
@@ -288,7 +287,10 @@ impl NicPage {
                         self.confirm_apply = Some(row);
                     }
                 }
-                if resp_name.clicked() {
+                if [resp_name, r_ip, r_mask, r_gw, r_dns1, r_dns2]
+                    .iter()
+                    .any(|r| r.clicked() || r.gained_focus())
+                {
                     self.selected_row = Some(row);
                 }
                 // 改了就写回内存（自动保存到 config.json 在失去焦点时做，

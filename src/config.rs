@@ -40,6 +40,12 @@ pub struct DebugConfig {
     pub listen_port: u16,
     /// WebSocket 直连地址
     pub ws_url: String,
+    /// RTU 串口参数
+    pub serial_port: String,
+    pub baud: u32,
+    pub data_bits: u8,
+    pub parity: String,
+    pub stop_bits: String,
     /// Modbus 从站地址
     pub unit_id: u8,
     /// 远程地址历史（最近在前，最多 10 条）
@@ -138,6 +144,11 @@ impl Default for DebugConfig {
             remote_port: 502,
             listen_port: 9000,
             ws_url: "ws://127.0.0.1:8080".to_string(),
+            serial_port: "COM1".to_string(),
+            baud: 9600,
+            data_bits: 8,
+            parity: "None".to_string(),
+            stop_bits: "1".to_string(),
             unit_id: 1,
             host_history: Vec::new(),
             ws_history: Vec::new(),

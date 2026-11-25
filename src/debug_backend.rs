@@ -135,7 +135,7 @@ pub fn start_tcp_client(
                         format!("✓ 已连接 {host}:{port}"),
                     ));
                     let _ = tx.try_send(DebugEvent::Connected(true));
-                    let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+                    let _ = stream.set_read_timeout(Some(Duration::from_millis(20)));
                     let mut buf = [0u8; 4096];
                     let mut alive = true;
                     while alive {
@@ -270,7 +270,7 @@ pub fn start_tcp_server(port: u16) -> Result<DebugSession, String> {
                         LogLevel::Sys,
                         format!("→ 客户端 {addr_str} 已连接"),
                     ));
-                    let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+                    let _ = stream.set_read_timeout(Some(Duration::from_millis(20)));
                     let read_stream = match stream.try_clone() {
                         Ok(s) => s,
                         Err(_) => continue,
@@ -342,7 +342,7 @@ pub fn start_udp(
         .map_err(|e| format!("监听端口 {listen_port} 失败：{e}（可能被占用）"))?;
     let actual_port = socket.local_addr().map(|a| a.port()).unwrap_or(listen_port);
     socket
-        .set_read_timeout(Some(Duration::from_millis(200)))
+        .set_read_timeout(Some(Duration::from_millis(20)))
         .map_err(|e| format!("监听端口 {listen_port} 失败：{e}"))?;
     let socket = Arc::new(socket);
     let last_sender: Arc<Mutex<Option<std::net::SocketAddr>>> = Arc::new(Mutex::new(None));
@@ -444,7 +444,7 @@ pub fn start_websocket(url: String, auto_reconnect: bool) -> Result<DebugSession
                     .map_err(|e| format!("WebSocket 握手失败：{e}"))?;
                 socket
                     .get_mut()
-                    .set_read_timeout(Some(Duration::from_millis(200)))
+                    .set_read_timeout(Some(Duration::from_millis(20)))
                     .map_err(|e| format!("设置读超时失败：{e}"))?;
                 Ok(socket)
             })();

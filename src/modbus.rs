@@ -70,7 +70,8 @@ pub fn build_pdu(job: &MasterJob) -> Vec<u8> {
         16 => {
             pdu.extend_from_slice(&job.qty.to_be_bytes());
             pdu.push((job.qty * 2) as u8);
-            for v in job.values.iter().take(job.qty as usize) {
+            for i in 0..job.qty as usize {
+                let v = job.values.get(i).copied().unwrap_or(0);
                 pdu.extend_from_slice(&v.to_be_bytes());
             }
         }
@@ -105,21 +106,42 @@ pub fn clamp_qty(fc: u8, qty: u16) -> u16 {
 /// 解析写值：按 `,` / 空格 / `;` / `，` 切，接受十进制、`0x` 十六进制、
 /// `on|off|true|false`（线圈 1/0）。解析失败的当 0。
 pub fn parse_values(text: &str) -> Vec<u16> {
-    text.split(|c| c == ',' || c == ' ' || c == ';' || c == '，' || c == '\t' || c == '\n')
+    parse_values_strict(text).unwrap_or_else(|_| {
+        text.split(|c| c == ',' || c == ' ' || c == ';' || c == '，' || c == '\t' || c == '\n')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| parse_single_value(s).unwrap_or(0))
+            .collect()
+    })
+}
+
+fn parse_single_value(s: &str) -> Result<u16, String> {
+    match s.to_ascii_lowercase().as_str() {
+        "on" | "true" => Ok(1),
+        "off" | "false" => Ok(0),
+        _ => {
+            if let Some(h) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+                u16::from_str_radix(h, 16).map_err(|_| format!("写入值“{s}”不是有效的十六进制 0-FFFF"))
+            } else {
+                s.parse::<u16>()
+                    .map_err(|_| format!("写入值“{s}”不是 0-65535"))
+            }
+        }
+    }
+}
+
+/// 严格解析写值（支持十进制、`0x` 十六进制、`on|off|true|false`），空或非法返回 Err。
+pub fn parse_values_strict(text: &str) -> Result<Vec<u16>, String> {
+    let vals: Vec<u16> = text
+        .split(|c| c == ',' || c == ' ' || c == ';' || c == '，' || c == '\t' || c == '\n')
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(|s| match s.to_ascii_lowercase().as_str() {
-            "on" | "true" => 1,
-            "off" | "false" => 0,
-            _ => {
-                if let Some(h) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-                    u16::from_str_radix(h, 16).unwrap_or(0)
-                } else {
-                    s.parse().unwrap_or(0)
-                }
-            }
-        })
-        .collect()
+        .map(parse_single_value)
+        .collect::<Result<_, _>>()?;
+    if vals.is_empty() {
+        return Err("写入值不能为空".into());
+    }
+    Ok(vals)
 }
 
 /// 解析响应 PDU（不含 MBAP）。异常码返回 Err。
@@ -193,10 +215,13 @@ pub fn spawn_poller(job: MasterJob, stop: Arc<AtomicBool>) -> Receiver<MasterMsg
                 );
                 let result = stream
                     .write_all(&req)
-                    .and_then(|_| read_frame(&mut stream))
-                    .map_err(|e| format!("✗ {label} 失败：{e}"))
+                    .and_then(|_| read_frame(&mut stream, tid, job.unit))
+                    .map_err(|e| {
+                        let fatal = is_fatal_io_err(&e);
+                        (format!("✗ {label} 失败：{e}"), fatal)
+                    })
                     .and_then(|pdu| {
-                        parse_response(job.fc, &pdu).map_err(|e| format!("✗ {label} {e}"))
+                        parse_response(job.fc, &pdu).map_err(|e| (format!("✗ {label} {e}"), false))
                     });
                 match result {
                     Ok((bits, regs)) => {
@@ -218,8 +243,12 @@ pub fn spawn_poller(job: MasterJob, stop: Arc<AtomicBool>) -> Receiver<MasterMsg
                             });
                         }
                     }
-                    Err(e) => {
+                    Err((e, fatal)) => {
                         let _ = tx.try_send(MasterMsg::Log(e));
+                        if fatal {
+                            let _ = tx.try_send(MasterMsg::Log("✗ 连接已断开，轮询停止".into()));
+                            break;
+                        }
                     }
                 }
                 if job.once {
@@ -316,19 +345,48 @@ pub fn spawn_rtu_poller(
     rx
 }
 
-/// 读一帧：MBAP 头 6 字节 + 长度指定的剩余部分。
-fn read_frame(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
+fn is_fatal_io_err(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::UnexpectedEof
+            | std::io::ErrorKind::NotConnected
+    )
+}
+
+/// 读一帧：MBAP 头 6 字节 + 长度指定的剩余部分，并校验协议号、TID 与从站地址。
+fn read_frame(
+    stream: &mut TcpStream,
+    expected_tid: u16,
+    expected_unit: u8,
+) -> std::io::Result<Vec<u8>> {
     let mut head = [0u8; 6];
     stream.read_exact(&mut head)?;
+    let tid = u16::from_be_bytes([head[0], head[1]]);
+    let proto = u16::from_be_bytes([head[2], head[3]]);
     let len = u16::from_be_bytes([head[4], head[5]]) as usize;
-    if len < 2 || len > 260 {
+    if proto != 0 || len < 2 || len > 260 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!("MBAP 长度非法 {len}"),
+            format!("MBAP 头非法（proto={proto}, len={len}）"),
         ));
     }
     let mut rest = vec![0u8; len];
     stream.read_exact(&mut rest)?;
+    if tid != expected_tid {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("TID 不匹配：期望 {expected_tid} 收到 {tid}"),
+        ));
+    }
+    if rest[0] != expected_unit {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("从站地址不匹配：期望 {expected_unit} 收到 {}", rest[0]),
+        ));
+    }
     Ok(rest[1..].to_vec())
 }
 
@@ -363,6 +421,26 @@ mod tests {
         j.values = vec![0x1234, 0x5678];
         let f = build_request(1, &j);
         assert_eq!(f, vec![0, 1, 0, 0, 0, 11, 1, 16, 0, 0, 0, 2, 4, 0x12, 0x34, 0x56, 0x78]);
+    }
+
+    #[test]
+    fn write_multi_regs_pads_missing_values_to_match_qty() {
+        let mut j = job(16);
+        j.qty = 3;
+        j.values = vec![0x1234];
+        let pdu = build_pdu(&j);
+        // byte_count = 6, 后面必须有 6 个字节数据（缺失补 0）
+        assert_eq!(pdu, vec![16, 0, 0, 0, 3, 6, 0x12, 0x34, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn parse_values_strict_supports_hex_and_bool() {
+        assert_eq!(
+            parse_values_strict("10, 0x0064, on, off").unwrap(),
+            vec![10, 100, 1, 0]
+        );
+        assert!(parse_values_strict("").is_err());
+        assert!(parse_values_strict("abc").is_err());
     }
 
     #[test]
@@ -421,5 +499,64 @@ mod tests {
             }
         }
         assert_eq!(got, Some(vec![10, 20]));
+    }
+
+    #[test]
+    fn poller_stops_on_connection_drop() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (s, _) = listener.accept().unwrap();
+            drop(s);
+        });
+        let mut j = job(3);
+        j.port = port;
+        j.once = false;
+        j.interval_ms = 20;
+        let rx = spawn_poller(j, Arc::new(AtomicBool::new(false)));
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let mut stopped = false;
+        while std::time::Instant::now() < deadline {
+            match rx.try_recv() {
+                Ok(MasterMsg::Stopped) => {
+                    stopped = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        assert!(stopped, "连接断开后轮询线程应退出并发出 Stopped");
+    }
+
+    #[test]
+    fn poller_rejects_mismatched_tid() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 256];
+            let _ = s.read(&mut buf).unwrap();
+            // 故意回错 TID (0x99, 0x99)
+            let resp = [0x99u8, 0x99, 0, 0, 0, 5, 1, 3, 2, 0, 1];
+            s.write_all(&resp).unwrap();
+        });
+        let mut j = job(3);
+        j.port = port;
+        j.qty = 1;
+        let rx = spawn_poller(j, Arc::new(AtomicBool::new(false)));
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let mut got_tid_err = false;
+        while std::time::Instant::now() < deadline {
+            match rx.try_recv() {
+                Ok(MasterMsg::Log(msg)) if msg.contains("TID 不匹配") => {
+                    got_tid_err = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        assert!(got_tid_err, "应拦截 TID 不匹配的响应帧");
     }
 }

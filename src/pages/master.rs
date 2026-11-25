@@ -116,23 +116,6 @@ impl MasterPage {
         }
     }
 
-    fn parse_values(&self) -> Result<Vec<u16>, String> {
-        let vals: Vec<u16> = self
-            .write_text
-            .split([',', ' ', ';', '，'])
-            .filter(|s| !s.trim().is_empty())
-            .map(|s| {
-                s.trim()
-                    .parse::<u16>()
-                    .map_err(|_| format!("写入值“{s}”不是 0-65535"))
-            })
-            .collect::<Result<_, _>>()?;
-        if vals.is_empty() {
-            return Err("写入值不能为空".into());
-        }
-        Ok(vals)
-    }
-
     fn start(&mut self, shared: &mut Shared, once: bool) {
         if self.running {
             shared.toast("请先停止当前轮询");
@@ -158,10 +141,10 @@ impl MasterPage {
             self.set_status(false, "✗ 串口不能为空");
             return;
         }
-        let mut qty = self.qty.clamp(1, 125);
+        let mut qty = modbus::clamp_qty(self.fc, self.qty);
         let mut values = Vec::new();
         if modbus::is_write(self.fc) {
-            values = match self.parse_values() {
+            values = match modbus::parse_values_strict(&self.write_text) {
                 Ok(v) => v,
                 Err(e) => {
                     self.set_status(false, format!("✗ {e}"));
@@ -171,7 +154,7 @@ impl MasterPage {
             qty = if matches!(self.fc, 5 | 6) {
                 1
             } else {
-                (values.len() as u16).clamp(1, 123)
+                modbus::clamp_qty(self.fc, values.len() as u16)
             };
             values.truncate(qty as usize);
         }
@@ -256,14 +239,15 @@ impl MasterPage {
             ui.add(egui::DragValue::new(&mut self.addr).range(0..=65535));
             if !matches!(self.fc, 5 | 6) {
                 ui.label("数量");
-                ui.add(egui::DragValue::new(&mut self.qty).range(1..=125));
+                let max_qty = modbus::clamp_qty(self.fc, u16::MAX);
+                ui.add(egui::DragValue::new(&mut self.qty).range(1..=max_qty));
             }
             if modbus::is_write(self.fc) {
                 ui.label("写入值");
                 ui.add_sized(
                     [160.0, 26.0],
                     egui::TextEdit::singleline(&mut self.write_text)
-                        .hint_text("逗号分隔，如 100,200"),
+                        .hint_text("逗号分隔，如 100,0x64,on"),
                 );
             }
         });
@@ -287,7 +271,7 @@ impl MasterPage {
                     ui.strong("状态");
                     ui.end_row();
                     for (i, b) in self.bits.iter().enumerate() {
-                        ui.monospace(format!("{}", self.base + i as u16));
+                        ui.monospace(format!("{}", u32::from(self.base) + i as u32));
                         ui.colored_label(
                             if *b { crate::app::OK } else { crate::app::MUTED },
                             if *b { "● 1" } else { "○ 0" },
@@ -300,7 +284,7 @@ impl MasterPage {
                     ui.strong("十六进制");
                     ui.end_row();
                     for (i, v) in self.regs.iter().enumerate() {
-                        ui.monospace(format!("{}", self.base + i as u16));
+                        ui.monospace(format!("{}", u32::from(self.base) + i as u32));
                         ui.monospace(format!("{v}"));
                         ui.monospace(format!("0x{v:04X}"));
                         ui.end_row();
